@@ -153,3 +153,5 @@ After changing the package version, change the image tag and expected version to
 | `.github/workflows/ci-cd.yml` | GitHub Actions workflow |
 | `azure-pipelines.yml` | Azure DevOps pipeline |
 | `Dockerfile` | Optional deployment of the existing wheel |
+
+Edit: Even updating the readme will trigger a commit
