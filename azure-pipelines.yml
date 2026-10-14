@@ -1,0 +1,113 @@
+# Azure DevOps Services pipeline. See docs/PIPELINES.md for first-run setup.
+trigger:
+  branches:
+    include:
+      - '*'
+
+# YAML PR triggers work for GitHub repos. Azure Repos requires a branch policy.
+pr:
+  branches:
+    include:
+      - main
+
+pool:
+  vmImage: ubuntu-24.04
+
+variables:
+  pythonVersion: '3.13'
+  PIP_DISABLE_PIP_VERSION_CHECK: '1'
+
+stages:
+  - stage: CI
+    displayName: Test and package
+    jobs:
+      - job: TestAndPackage
+        timeoutInMinutes: 15
+        steps:
+          - checkout: self
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: '$(pythonVersion)'
+            displayName: Select Python
+          - script: |
+              set -euo pipefail
+              python -m pip install -r requirements-dev.txt
+              python -m pip install --no-build-isolation -e .
+            displayName: Install development tools and app
+          - script: |
+              set -euo pipefail
+              python -m ruff check .
+              python -m ruff format --check .
+            displayName: Check code and formatting
+          - script: >-
+              python -m pytest --cov --cov-report=term-missing
+              --cov-report=xml:coverage.xml --junitxml=test-results/junit.xml
+            displayName: Run tests and coverage gate
+          - task: PublishTestResults@2
+            condition: succeededOrFailed()
+            inputs:
+              testResultsFormat: JUnit
+              testResultsFiles: test-results/junit.xml
+              failTaskOnFailedTests: true
+              testRunTitle: Python tests
+            displayName: Publish test results, including failures
+          # The coverage publisher uses .NET, even for Python coverage reports.
+          - task: UseDotNet@2
+            condition: succeededOrFailed()
+            inputs:
+              packageType: sdk
+              version: '8.x'
+            displayName: Prepare coverage reporting runtime
+          - task: PublishCodeCoverageResults@2
+            condition: succeededOrFailed()
+            inputs:
+              summaryFileLocation: '$(System.DefaultWorkingDirectory)/coverage.xml'
+              failIfCoverageEmpty: false
+            displayName: Publish coverage
+          - script: python scripts/release.py build
+            env:
+              RELEASE_COMMIT: $(Build.SourceVersion)
+            displayName: Build wheel once and record release identity
+          - script: >-
+              python scripts/release.py deploy --artifact-dir dist
+              --target "$(Agent.TempDirectory)/candidate"
+            displayName: Verify the installed wheel, away from source code
+          - task: PublishPipelineArtifact@1
+            inputs:
+              targetPath: '$(System.DefaultWorkingDirectory)/dist'
+              artifact: wheel-release
+            displayName: Publish deployable wheel and manifest
+
+  - stage: Staging
+    displayName: Deploy wheel to staging sandbox
+    dependsOn: CI
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'), ne(variables['Build.Reason'], 'PullRequest'))
+    jobs:
+      - deployment: DeployWheel
+        displayName: Install the same release wheel
+        timeoutInMinutes: 10
+        # Create this environment and authorize the pipeline before its first run.
+        environment: staging
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+                - download: none
+                - task: UsePythonVersion@0
+                  inputs:
+                    versionSpec: '$(pythonVersion)'
+                  displayName: Select Python
+                - download: current
+                  artifact: wheel-release
+                  displayName: Download this run's wheel; do not rebuild
+                - script: >-
+                    python scripts/release.py deploy
+                    --artifact-dir "$(Pipeline.Workspace)/wheel-release"
+                    --target "$(Agent.TempDirectory)/staging"
+                  displayName: Install the verified wheel and smoke-test staging
+                - task: PublishPipelineArtifact@1
+                  inputs:
+                    targetPath: '$(Agent.TempDirectory)/staging/installed-release.json'
+                    artifact: staging-receipt
+                  displayName: Save staging deployment receipt

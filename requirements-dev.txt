@@ -1,0 +1,6 @@
+# Pin workshop tools. This is not a full transitive dependency lockfile.
+build==1.6.1
+pytest==9.1.1
+pytest-cov==7.1.0
+ruff==0.17.0
+setuptools==84.0.0
