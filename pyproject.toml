@@ -5,10 +5,13 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "cicd-demo"
 version = "0.1.0"
-description = "A wheel-based CI/CD teaching project"
+description = "A FastAPI CI/CD teaching project"
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "fastapi>=0.110.0",
+    "uvicorn[standard]>=0.28.0",
+]
 
 [project.scripts]
 cicd-demo = "cicd_demo.server:main"

@@ -1,0 +1,63 @@
+name: Integration Pipeline
+
+on:
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: integration-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: '3.13'
+  PIP_DISABLE_PIP_VERSION_CHECK: '1'
+
+jobs:
+  lint-and-test:
+    name: Lint, Format, and Unit Tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+            pyproject.toml
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install -r requirements.txt -r requirements-dev.txt
+          python -m pip install --no-build-isolation -e .
+
+      - name: Lint Code (Ruff)
+        run: python -m ruff check .
+
+      - name: Verify Formatting (Ruff)
+        run: python -m ruff format --check .
+
+      - name: Run Test Suite and Coverage Gate
+        run: >-
+          python -m pytest --cov --cov-report=term-missing
+          --cov-report=xml:coverage.xml --junitxml=test-results/junit.xml
+
+      - name: Upload Test and Coverage Reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-reports
+          path: |
+            test-results/
+            coverage.xml
+          retention-days: 7
+          if-no-files-found: warn

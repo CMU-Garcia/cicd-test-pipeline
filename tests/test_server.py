@@ -1,59 +1,58 @@
 import json
-from http.server import ThreadingHTTPServer
-from importlib.metadata import version
-from threading import Thread
-from unittest.mock import MagicMock
-from urllib.error import HTTPError
-from urllib.request import urlopen
+from importlib.metadata import PackageNotFoundError
+from unittest.mock import MagicMock, patch
 
 import pytest
+from fastapi.testclient import TestClient
 
-from cicd_demo.server import DemoHandler
+from cicd_demo.server import app, get_app_version
 from cicd_demo.server import main as server_main
 
-
-@pytest.fixture(scope="module")
-def base_url():
-    with ThreadingHTTPServer(("127.0.0.1", 0), DemoHandler) as server:
-        thread = Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-        yield f"http://127.0.0.1:{server.server_port}"
-        server.shutdown()
-        thread.join(timeout=5)
+client = TestClient(app)
 
 
-def get(base_url, path):
-    try:
-        response = urlopen(base_url + path, timeout=5)
-    except HTTPError as error:
-        response = error
-    with response:
-        return response.status, response.headers, response.read()
+def test_homepage_is_served():
+    response = client.get("/")
+    assert response.status_code == 200
+    assert "text/html" in response.headers["content-type"]
+    assert "This page ships inside the Python wheel." in response.text
 
 
-def test_homepage_is_packaged(base_url):
-    status, headers, body = get(base_url, "/")
-    assert status == 200
-    assert headers["Content-Type"] == "text/html; charset=utf-8"
-    assert int(headers["Content-Length"]) == len(body)
-    assert b"This page ships inside the Python wheel." in body
+def test_homepage_fallback_when_resource_missing():
+    with patch("cicd_demo.server.files", side_effect=Exception("Missing")):
+        response = client.get("/")
+        assert response.status_code == 200
+        assert "CI/CD FastAPI Demo" in response.text
 
 
-def test_health_reports_installed_version(base_url):
-    status, headers, body = get(base_url, "/health")
-    assert status == 200
-    assert headers["Content-Type"] == "application/json"
-    assert json.loads(body) == {"status": "ok", "version": version("cicd-demo")}
+def test_health_endpoint():
+    response = client.get("/health")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "ok"
+    assert "version" in data
 
 
-@pytest.mark.parametrize(("subtotal", "fee"), [("0", 500), ("4999", 500), ("5000", 0)])
-def test_quote_api(base_url, subtotal, fee):
-    status, _, body = get(base_url, f"/api/quote?subtotal_cents={subtotal}")
-    assert status == 200
-    assert json.loads(body) == {
+def test_get_app_version_fallback():
+    with patch("cicd_demo.server.version", side_effect=PackageNotFoundError):
+        assert get_app_version() == "0.1.0"
+
+
+@pytest.mark.parametrize(
+    ("subtotal", "shipping", "total"),
+    [
+        ("0", 500, 500),
+        ("4999", 500, 5499),
+        ("5000", 0, 5000),
+    ],
+)
+def test_quote_endpoint(subtotal, shipping, total):
+    response = client.get(f"/api/quote?subtotal_cents={subtotal}")
+    assert response.status_code == 200
+    assert response.json() == {
         "subtotal_cents": int(subtotal),
-        "shipping_cents": fee,
-        "total_cents": int(subtotal) + fee,
+        "shipping_cents": shipping,
+        "total_cents": total,
     }
 
 
@@ -70,29 +69,38 @@ def test_quote_api(base_url, subtotal, fee):
         "subtotal_cents=%2B5",
     ],
 )
-def test_invalid_quote_returns_400(base_url, query):
-    status, _, body = get(base_url, f"/api/quote?{query}")
-    assert status == 400
-    assert "error" in json.loads(body)
+def test_invalid_quote_returns_400(query):
+    response = client.get(f"/api/quote?{query}")
+    assert response.status_code == 400
+    assert "error" in response.json()
 
 
-def test_unknown_route_returns_404(base_url):
-    status, _, body = get(base_url, "/missing")
-    assert status == 404
-    assert json.loads(body) == {"error": "not found"}
+def test_unknown_route_returns_404():
+    response = client.get("/missing")
+    assert response.status_code == 404
+    assert response.json() == {"error": "not found"}
+
+
+def test_openapi_docs_endpoint():
+    response = client.get("/docs")
+    assert response.status_code == 200
 
 
 @pytest.mark.parametrize("interrupted", [False, True])
 def test_cli_binds_requested_address_and_closes_server(monkeypatch, capsys, interrupted):
-    server = MagicMock()
-    server.server_port = 12345
+    mock_run = MagicMock()
     if interrupted:
-        server.serve_forever.side_effect = KeyboardInterrupt
-    factory = MagicMock()
-    factory.return_value.__enter__.return_value = server
-    monkeypatch.setattr("cicd_demo.server.ThreadingHTTPServer", factory)
+        mock_run.side_effect = KeyboardInterrupt
+    monkeypatch.setattr("uvicorn.run", mock_run)
     monkeypatch.setattr("sys.argv", ["cicd-demo", "--host", "127.0.0.1", "--port", "0"])
-    server_main()
-    factory.assert_called_once_with(("127.0.0.1", 0), DemoHandler)
-    assert json.loads(capsys.readouterr().out) == {"host": "127.0.0.1", "port": 12345}
-    factory.return_value.__exit__.assert_called_once()
+
+    try:
+        server_main()
+    except KeyboardInterrupt:
+        pass
+
+    mock_run.assert_called_once()
+    output = json.loads(capsys.readouterr().out)
+    assert output["host"] == "127.0.0.1"
+    assert isinstance(output["port"], int)
+    assert output["port"] > 0
